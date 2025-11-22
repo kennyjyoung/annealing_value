@@ -54,7 +54,7 @@ def run_annealing_step(
     last_cost: jnp.ndarray,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     key, subkey = jax.random.split(key)
-    proposed_position = position + 0.01 * (jax.random.bernoulli(subkey, 0.5) - 0.5) * 2
+    proposed_position = position + 0.05 * (jax.random.bernoulli(subkey, 0.5) - 0.5) * 2
     proposed_cost = energy(proposed_position)
     key, subkey = jax.random.split(key)
     accept = jax.random.bernoulli(subkey, jnp.clip(jnp.exp(-(proposed_cost - last_cost) / temperature), 0, 1))

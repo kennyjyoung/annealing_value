@@ -5,9 +5,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pickle
 
-num_steps = 1000
+num_steps = 500
 cooling_rate = 0.95
-initial_temperature = 100.0
+initial_temperature = 1000.0
 num_simulations = 100000
 
 parallel_sim = jax.jit(jax.vmap(run_multiple_annealing_steps, in_axes=(0, 0, None, 0, None, None, None)), static_argnums=(4, 5, 6))
@@ -64,7 +64,7 @@ def plot_value_histograms(sampled_positions, sampled_steps, final_costs):
     edges = [int(i * total_steps / 10) for i in range(11)]
 
     # Position binning for bar plots
-    num_pos_bins = 50
+    num_pos_bins = 100
     pos_edges = np.linspace(pos_min, pos_max, num_pos_bins + 1)
     bin_width = pos_edges[1] - pos_edges[0]
     bin_centers = 0.5 * (pos_edges[:-1] + pos_edges[1:])

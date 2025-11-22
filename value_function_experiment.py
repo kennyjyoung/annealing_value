@@ -131,6 +131,8 @@ def run_value_based_annealing_step(
 ) -> tuple[float, float, float]:
     step_idx = value_function._temperature_to_step(temperature)
     key, subkey = jax.random.split(key)
+    current_value = value_function.energy(temperature, position)
+    current_cost = energy(position)
     proposed_position = position + 0.01 * (jax.random.bernoulli(subkey, 0.5) - 0.5) * 2
     proposed_cost = energy(proposed_position)
     proposed_value = value_function.energy(temperature, proposed_position)
@@ -140,10 +142,15 @@ def run_value_based_annealing_step(
     # key, subkey = jax.random.split(key) -> this was in original code
     key, subkey = jax.random.split(key)
     
-    # better_value = proposed_value <= last_value
+    better_value = proposed_value < current_value
+    worse_value = proposed_value > current_value
+    accept = jax.random.bernoulli(subkey, 0.5)
+    accept = jnp.where(better_value, True, accept)
+    accept = jnp.where(worse_value, False, accept)
+
     # accept = jnp.where(better_value, False, True)
-    accept = jax.random.bernoulli(subkey, jnp.clip(jnp.exp(-(proposed_value - last_value) / temperature), 0, 1))
-    # accept = jax.random.bernoulli(subkey, jnp.clip(jnp.exp(-(proposed_cost - last_cost) / temperature), 0, 1))
+    # accept = jax.random.bernoulli(subkey, jnp.clip(jnp.exp(-(proposed_value - last_value) / temperature), 0, 1))
+    # # accept = jax.random.bernoulli(subkey, jnp.clip(jnp.exp(-(proposed_cost - last_cost) / temperature), 0, 1))
     # accept = jnp.where(better_value, accept, True)
     return jnp.where(accept, proposed_position, position), jnp.where(accept, proposed_cost, last_cost), jnp.where(accept, proposed_value, last_value)
 
