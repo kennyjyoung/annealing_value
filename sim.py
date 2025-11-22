@@ -4,8 +4,6 @@ import jax.numpy as jnp
 import numpy as np
 import matplotlib.pyplot as plt
 
-cooling_rate = 0.99
-
 # Visualization state (reused across calls)
 _viz_fig = None
 _viz_ax = None
@@ -68,6 +66,7 @@ def run_multiple_annealing_steps(
     temperature: jnp.ndarray, 
     last_cost: jnp.ndarray, 
     num_steps: int,
+    cooling_rate: float,
     samples: int = 1,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     key, subkey = jax.random.split(key)
@@ -131,7 +130,8 @@ if __name__ == "__main__":
     visualize_position(position, delay_seconds=0.1)
     jit_run_multiple_annealing_steps = jax.jit(run_multiple_annealing_steps, static_argnums=(4,))
     for i in range(num_steps):
-        sampled_positions, sampled_steps, position, last_cost, temperature, key = jit_run_multiple_annealing_steps(position, key, temperature, last_cost, 1)
+        sampled_positions, sampled_steps, position, last_cost, temperature, key = jit_run_multiple_annealing_steps(position, key, temperature, last_cost, 1, cooling_rate)
+        temperature = temperature * cooling_rate
         visualize_position(position, delay_seconds=0.01)
     visualize_position(position, delay_seconds=0.5)
     close_visualization()

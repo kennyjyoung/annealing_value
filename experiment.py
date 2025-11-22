@@ -6,18 +6,18 @@ import matplotlib.pyplot as plt
 import pickle
 
 num_steps = 1000
-cooling_rate = 0.99
-initial_temperature = 10.0
+cooling_rate = 0.95
+initial_temperature = 100.0
 num_simulations = 100000
 
-parallel_sim = jax.jit(jax.vmap(run_multiple_annealing_steps, in_axes=(0, 0, None, 0, None, None)), static_argnums=(4, 5))
+parallel_sim = jax.jit(jax.vmap(run_multiple_annealing_steps, in_axes=(0, 0, None, 0, None, None, None)), static_argnums=(4, 5, 6))
 
 positions = jax.random.uniform(jax.random.PRNGKey(0), (num_simulations,), minval=-5.0, maxval=5.0)
 initial_costs = jax.vmap(energy)(positions)
 
 keys = jax.random.split(jax.random.PRNGKey(0), num_simulations)
 
-sampled_positions, sampled_steps, final_positions, final_costs, final_temperatures, final_keys = parallel_sim(positions, keys, initial_temperature, initial_costs, num_steps, 10)
+sampled_positions, sampled_steps, final_positions, final_costs, final_temperatures, final_keys = parallel_sim(positions, keys, initial_temperature, initial_costs, num_steps,cooling_rate, 10)
 
 mean_final_cost = jnp.mean(final_costs)
 std_final_cost = jnp.std(final_costs)
