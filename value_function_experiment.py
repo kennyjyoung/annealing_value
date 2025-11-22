@@ -1,70 +1,68 @@
 
-
 from dataclasses import dataclass
+import functools
 from typing import Callable, List
+import jax
 import numpy as np
 import pickle
 
-
-def _make_piecewise_constant(bin_edges: np.ndarray, values: np.ndarray, counts: np.ndarray) -> Callable[[float], float]:
-    """
-    Build a scalar function f(x) that returns a piecewise-constant value per position bin.
-    - bin_edges: shape (B+1,)
-    - values: shape (B,)
-    - counts: shape (B,) used to repair empty bins
-    """
-    assert bin_edges.ndim == 1 and values.ndim == 1 and counts.ndim == 1
-    assert len(bin_edges) == len(values) + 1 == len(counts) + 1
-
-    # Fill empty bins by nearest-neighbor interpolation over indices
-    filled = values.astype(float).copy()
-    valid = counts > 0
-    if not np.any(valid):
-        # Fallback: flat zero if no data at all
-        filled[:] = 0.0
-    else:
-        idxs = np.arange(len(values))
-        filled[~valid] = np.interp(idxs[~valid], idxs[valid], values[valid])
-
-    def f(x: float) -> float:
-        # Right-inclusive on upper edge except final bin
-        i = int(np.searchsorted(bin_edges, x, side="right") - 1)
-        i = 0 if i < 0 else (len(filled) - 1 if i >= len(filled) else i)
-        return float(filled[i])
-
-    return f
+from sim import close_visualization, energy, visualize_position
+import jax.numpy as jnp
 
 
-@dataclass
+@jax.tree_util.register_pytree_node_class
+@dataclass(frozen=True, eq=True)
 class HistogramEnergyFunctions:
-    energy_functions: List[Callable[[float], float]]
-    pos_edges: np.ndarray
-    step_edges: np.ndarray  # integer step edges of length N+1
+    values: jnp.ndarray  # Shape: (num_slices, num_bins)
+    pos_edges: jnp.ndarray # Shape: (num_bins + 1,)
+    step_edges: jnp.ndarray  # integer step edges of length num_slices + 1
     initial_temperature: float
     cooling_rate: float
 
-    def _temperature_to_step(self, temperature: float) -> int:
+    def tree_flatten(self):
+        children = (self.values, self.pos_edges, self.step_edges)
+        aux_data = (self.initial_temperature, self.cooling_rate)
+        return (children, aux_data)
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        return cls(*children, *aux_data)
+
+    def _temperature_to_step(self, temperature: jnp.ndarray) -> jnp.ndarray:
         """
         Map a temperature to an approximate step index using:
             T(step) = initial_temperature * cooling_rate ** step
         """
-        # Guard against invalid temperatures
-        if temperature <= 0:
-            return int(self.step_edges[-2])  # map to last bin
+        # Guard against invalid temperatures to avoid NaNs in log
+        safe_temp = jnp.where(temperature <= 1e-10, 1e-10, temperature)
+        
         # Solve for step; note log(cooling_rate) < 0
-        step_float = np.log(temperature / self.initial_temperature) / np.log(self.cooling_rate)
+        step_float = jnp.log(safe_temp / self.initial_temperature) / jnp.log(self.cooling_rate)
+        
         # Lower temps → larger steps; clamp to valid range
-        step_idx = int(np.floor(step_float))
+        step_idx = jnp.floor(step_float)
+        
         # Allow steps before start (for temps slightly above initial) and after end
-        return max(int(self.step_edges[0]), min(step_idx, int(self.step_edges[-1] - 1)))
+        step = jnp.clip(step_idx, self.step_edges[0], self.step_edges[-1] - 1)
+        
+        # If temp was effectively 0 or negative, ensure we map to the end
+        return jnp.where(temperature <= 1e-10, self.step_edges[-1] - 1, step)
 
-    def energy(self, temperature: float, position: float) -> float:
+    def energy(self, temperature: jnp.ndarray, position: jnp.ndarray) -> jnp.ndarray:
         # Convert temperature to step and locate the slice index by step_edges
         step_idx = self._temperature_to_step(temperature)
+        
         # Find i s.t. step_idx in [step_edges[i], step_edges[i+1])
-        i = int(np.searchsorted(self.step_edges, step_idx, side="right") - 1)
-        i = 0 if i < 0 else (len(self.energy_functions) - 1 if i >= len(self.energy_functions) else i)
-        return self.energy_functions[i](position)
+        # step_edges is sorted
+        slice_idx = jnp.searchsorted(self.step_edges, step_idx, side="right") - 1
+        slice_idx = jnp.clip(slice_idx, 0, self.values.shape[0] - 1)
+        
+        # Find bin index for position
+        # pos_edges is sorted
+        bin_idx = jnp.searchsorted(self.pos_edges, position, side="right") - 1
+        bin_idx = jnp.clip(bin_idx, 0, self.values.shape[1] - 1)
+        
+        return self.values[slice_idx, bin_idx]
 
 
 def load_histogram_energy_functions(
@@ -81,30 +79,106 @@ def load_histogram_energy_functions(
     with open(pickle_path, "rb") as f:
         data = pickle.load(f)
 
-    pos_edges = np.asarray(data["pos_edges"])
+    pos_edges = jnp.asarray(data["pos_edges"])
     slices = data["slices"]  # list of dicts with counts, sum_costs, mean_costs, and start/end steps
-    step_edges = np.asarray(data["step_edges"])  # length = num_slices + 1
+    step_edges = jnp.asarray(data["step_edges"])  # length = num_slices + 1
 
-    energy_functions: List[Callable[[float], float]] = []
+    all_values = []
     for s in slices:
         counts = np.asarray(s["counts"])
-        means = np.asarray(s["mean_costs"])
-        fn = _make_piecewise_constant(pos_edges, means, counts)
-        energy_functions.append(fn)
+        values = np.asarray(s["mean_costs"])
+        
+        # Fill empty bins by nearest-neighbor interpolation over indices
+        filled = values.astype(float).copy()
+        valid = counts > 0
+        if not np.any(valid):
+            # Fallback: flat zero if no data at all
+            filled[:] = 0.0
+        else:
+            idxs = np.arange(len(values))
+            filled[~valid] = np.interp(idxs[~valid], idxs[valid], values[valid])
+        
+        all_values.append(filled)
+
+    values_array = jnp.asarray(np.stack(all_values))
 
     return HistogramEnergyFunctions(
-        energy_functions=energy_functions,
+        values=values_array,
         pos_edges=pos_edges,
         step_edges=step_edges,
         initial_temperature=float(initial_temperature),
         cooling_rate=float(cooling_rate),
     )
 
+# Remove static_argnums for value_function as it is now a valid PyTree
+@jax.jit
 def run_value_based_annealing_step(
     position: float,
     key: np.ndarray,
     temperature: float,
+    last_cost: float,
+    last_value: float,
     value_function: HistogramEnergyFunctions,
-) -> float:
+) -> tuple[float, float, float]:
     step_idx = value_function._temperature_to_step(temperature)
-    return value_function.energy(temperature, position)
+    key, subkey = jax.random.split(key)
+    proposed_position = position + 0.01 * (jax.random.bernoulli(subkey, 0.5) - 0.5) * 2
+    proposed_cost = energy(proposed_position)
+    proposed_value = value_function.energy(temperature, proposed_position)
+    
+    # Need another split for acceptance probability? 
+    # Original code reused 'key' which was split above.
+    # key, subkey = jax.random.split(key) -> this was in original code
+    key, subkey = jax.random.split(key)
+    
+    higher_value = proposed_value > last_value
+    accept = jax.random.bernoulli(subkey, jnp.clip(jnp.exp(-(proposed_cost - last_cost) / temperature), 0, 1))
+    accept = jnp.where(higher_value, accept, True)
+    return jnp.where(accept, proposed_position, position), jnp.where(accept, proposed_cost, last_cost), jnp.where(accept, proposed_value, last_value)
+
+def run_multiple_value_based_annealing_steps(
+    position: float,
+    key: np.ndarray,
+    temperature: float,
+    last_cost: float,
+    last_value: float,
+    value_function: HistogramEnergyFunctions,
+    num_steps: int,
+) -> tuple[float, float, float, np.ndarray]:
+    def scan_body(
+        carry: tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray],
+        step_idx: jnp.ndarray,
+    ) -> tuple[tuple[float, float, float, jnp.ndarray], None]:
+        position, last_cost, last_value, key = carry
+        key, step_key = jax.random.split(key)
+        position, last_cost, last_value = run_value_based_annealing_step(position, step_key, temperature, last_cost, last_value, value_function)
+        return (position, last_cost, last_value, key), None
+    
+    (position, last_cost, last_value, key), _ = jax.lax.scan(
+        scan_body, 
+        (position, last_cost, last_value, key), 
+        jnp.arange(num_steps)
+    )
+    return position, last_cost, last_value, key
+
+if __name__ == "__main__":
+    value_function = load_histogram_energy_functions()
+    position = jnp.array(0.0)
+    key = jax.random.PRNGKey(0)
+    temperature = 10.0
+    last_cost = energy(position)
+    last_value = value_function.energy(temperature, position)
+    
+    # Only num_steps (arg 6) is static. value_function (arg 5) is a PyTree.
+    jit_run_multiple_value_based_annealing_steps = jax.jit(run_multiple_value_based_annealing_steps, static_argnums=(6,))
+    
+    num_steps = 1000
+    for i in range(num_steps):
+        # Need to update key as well
+        position, last_cost, last_value, key = jit_run_multiple_value_based_annealing_steps(position, key, temperature, last_cost, last_value, value_function, 1)
+        visualize_position(position, delay_seconds=0.01)
+    visualize_position(position, delay_seconds=0.5)
+    close_visualization()
+    print(f"final position: {position}")
+    print(f"final cost: {last_cost}")
+    print(f"final value: {last_value}")
