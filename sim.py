@@ -68,21 +68,26 @@ def run_multiple_annealing_steps(
     temperature: jnp.ndarray, 
     last_cost: jnp.ndarray, 
     num_steps: int,
+    samples: int = 1,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    key, subkey = jax.random.split(key)
+    sampled_steps = jax.random.randint(subkey, (samples,), 0, num_steps)
+    sampled_positions = jnp.zeros((samples,))
     def scan_body(
-        carry: tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray],
+        carry: tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray],
         step_idx: jnp.ndarray,
     ) -> tuple[tuple[jnp.ndarray, jnp.ndarray], None]:
         _ = step_idx
-        position, last_cost, temperature, key = carry
+        position, last_cost, temperature, key, sampled_positions = carry
         key, step_key = jax.random.split(key)
         position, last_cost = run_annealing_step(position, step_key, temperature, last_cost)
         temperature = temperature * cooling_rate
-        return (position, last_cost, temperature, key), None
-    (final_position, final_cost, final_temperature, final_key), _ = jax.lax.scan(
-        scan_body, (position, last_cost, temperature, key), jnp.arange(num_steps)
+        sampled_positions = jnp.where(step_idx == sampled_steps, position, sampled_positions)
+        return (position, last_cost, temperature, key, sampled_positions), None
+    (final_position, final_cost, final_temperature, final_key, final_sampled_positions), _ = jax.lax.scan(
+        scan_body, (position, last_cost, temperature, key, sampled_positions), jnp.arange(num_steps)
     )
-    return final_position, final_cost, final_temperature, final_key
+    return final_sampled_positions, sampled_steps, final_position, final_cost, final_temperature, final_key
 
 def visualize_position(position: jnp.ndarray, x_min: float = -5.0, x_max: float = 5.0, delay_seconds: float = 0.03) -> None:
     """
@@ -126,7 +131,7 @@ if __name__ == "__main__":
     visualize_position(position, delay_seconds=0.1)
     jit_run_multiple_annealing_steps = jax.jit(run_multiple_annealing_steps, static_argnums=(4,))
     for i in range(num_steps):
-        position, last_cost, temperature, key = jit_run_multiple_annealing_steps(position, key, temperature, last_cost, 1)
+        sampled_positions, sampled_steps, position, last_cost, temperature, key = jit_run_multiple_annealing_steps(position, key, temperature, last_cost, 1)
         visualize_position(position, delay_seconds=0.01)
     visualize_position(position, delay_seconds=0.5)
     close_visualization()
